@@ -1,0 +1,970 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Estimate Scheduler</title>
+<style>
+/* ── Reset & Vars ─────────────────────────── */
+:root {
+  --pri: #2563eb; --pri-dk: #1d4ed8; --bg: #f1f5f9;
+  --card: #ffffff; --text: #1e293b; --mut: #64748b;
+  --bdr: #e2e8f0; --grn: #16a34a; --red: #dc2626;
+  --blu-lt: #dbeafe; --r: 10px;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+  background: var(--bg); color: var(--text);
+}
+
+/* ── Header ───────────────────────────────── */
+header {
+  background: var(--pri); color: #fff;
+  padding: .85rem 1.5rem;
+  display: flex; align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap; gap: .5rem;
+}
+header h1 { font-size: 1.25rem; font-weight: 700; }
+.hdr-r { display: flex; align-items: center; gap: .65rem; }
+.hdr-r button {
+  background: rgba(255,255,255,.18); color: #fff;
+  border: 1px solid rgba(255,255,255,.35);
+  padding: .45rem .9rem; border-radius: 6px;
+  cursor: pointer; font-size: .82rem; font-weight: 500;
+}
+.hdr-r button:hover { background: rgba(255,255,255,.32); }
+.live-dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: #4ade80; display: inline-block;
+  margin-right: 4px; animation: pulse 2s infinite;
+}
+@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.35} }
+
+/* ── Region Tabs ──────────────────────────── */
+.region-bar {
+  background: var(--card); border-bottom: 1px solid var(--bdr);
+  padding: 0 1.5rem; display: flex; gap: 0; overflow-x: auto;
+}
+.region-tab {
+  padding: .7rem 1.3rem; font-size: .88rem; font-weight: 600;
+  color: var(--mut); cursor: pointer;
+  border-bottom: 3px solid transparent;
+  white-space: nowrap; transition: all .15s;
+  user-select: none;
+}
+.region-tab:hover { color: var(--text); background: #f8fafc; }
+.region-tab.active { color: var(--pri); border-bottom-color: var(--pri); }
+
+/* ── Main Content ─────────────────────────── */
+.main { padding: 1.25rem; overflow-x: auto; }
+
+/* ── Date Navigation ──────────────────────── */
+.date-nav {
+  display: flex; align-items: center; gap: .75rem;
+  margin-bottom: 1rem; flex-wrap: wrap;
+}
+.date-nav h2 { font-size: 1.05rem; font-weight: 700; }
+.nav-btn {
+  background: var(--card); border: 1px solid var(--bdr);
+  width: 34px; height: 34px; border-radius: 8px;
+  cursor: pointer; font-size: 1rem;
+  display: flex; align-items: center; justify-content: center;
+}
+.nav-btn:hover { background: var(--blu-lt); }
+.today-btn {
+  background: var(--card); border: 1px solid var(--bdr);
+  padding: .35rem .75rem; border-radius: 6px;
+  cursor: pointer; font-size: .78rem; font-weight: 500;
+}
+.today-btn:hover { background: var(--blu-lt); }
+.view-btns { margin-left: auto; display: flex; gap: .25rem; }
+.view-btn {
+  background: var(--card); border: 1px solid var(--bdr);
+  padding: .35rem .75rem; border-radius: 6px;
+  cursor: pointer; font-size: .78rem; font-weight: 500;
+}
+.view-btn.active { background: var(--pri); color: #fff; border-color: var(--pri); }
+
+/* ── Calendar Table ───────────────────────── */
+.cal-wrap { overflow-x: auto; }
+table.cal { border-collapse: collapse; width: 100%; min-width: 700px; }
+table.cal th, table.cal td {
+  border: 1px solid var(--bdr); text-align: center; padding: 0;
+}
+/* Top-left corner cell */
+table.cal .corner {
+  background: #f8fafc; position: sticky; left: 0;
+  z-index: 5; min-width: 150px;
+}
+/* Day header cells */
+table.cal .day-hdr {
+  background: #f8fafc; padding: .5rem .3rem;
+  font-size: .82rem; font-weight: 700; color: var(--text);
+}
+table.cal .day-hdr.today { background: #dbeafe; color: #1d4ed8; }
+/* Time sub-header cells */
+table.cal .time-hdr {
+  background: #f8fafc; padding: .35rem .2rem;
+  font-size: .68rem; font-weight: 600;
+  color: var(--mut); text-transform: uppercase;
+}
+/* Estimator name cells (left column, sticky) */
+table.cal .est-cell {
+  background: var(--card); font-weight: 600; font-size: .85rem;
+  color: var(--text); padding: .5rem .65rem; text-align: left;
+  white-space: nowrap; position: sticky; left: 0; z-index: 2;
+  min-width: 150px; border-right: 2px solid var(--bdr);
+}
+
+/* ── Slot Cells ───────────────────────────── */
+.slot {
+  padding: .3rem .2rem; min-height: 56px;
+  cursor: pointer; transition: background .12s;
+  min-width: 95px;
+}
+.slot:hover { background: #eff6ff; }
+.slot.open { background: #f0fdf4; }
+.slot.booked { background: #fef2f2; }
+.badge {
+  display: inline-block; font-size: .6rem; padding: .1rem .35rem;
+  border-radius: 3px; font-weight: 700; letter-spacing: .3px;
+}
+.badge-open { background: #bbf7d0; color: #166534; }
+.badge-bk { background: #fecaca; color: #991b1b; }
+.slot .name { font-size: .72rem; font-weight: 600; margin-top: 2px; }
+.slot .type { font-size: .62rem; color: var(--mut); }
+.slot .addr {
+  font-size: .6rem; color: #7c3aed; font-weight: 500;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  max-width: 105px; margin: 1px auto 0;
+}
+
+/* ── Empty State ──────────────────────────── */
+.empty-msg {
+  padding: 2.5rem 1rem; text-align: center;
+  color: var(--mut); font-size: .9rem;
+}
+
+/* ── Modals ───────────────────────────────── */
+.overlay {
+  position: fixed; inset: 0; background: rgba(0,0,0,.45);
+  z-index: 100; display: flex; align-items: center;
+  justify-content: center;
+}
+.overlay.hidden { display: none; }
+.modal {
+  background: var(--card); border-radius: 12px;
+  width: 95%; max-width: 480px; max-height: 90vh;
+  overflow-y: auto; padding: 1.75rem;
+  box-shadow: 0 20px 60px rgba(0,0,0,.2);
+}
+.modal h2 { font-size: 1.05rem; margin-bottom: .2rem; }
+.modal .sub { font-size: .83rem; color: var(--mut); margin-bottom: 1.15rem; }
+.modal label {
+  display: block; font-size: .78rem; color: var(--mut);
+  margin-bottom: .15rem; font-weight: 600;
+}
+.modal input, .modal select, .modal textarea {
+  width: 100%; padding: .55rem .65rem; border: 1px solid var(--bdr);
+  border-radius: 6px; font-size: .88rem; margin-bottom: .8rem;
+  outline: none; font-family: inherit;
+}
+.modal input:focus, .modal select:focus, .modal textarea:focus {
+  border-color: var(--pri); box-shadow: 0 0 0 3px rgba(37,99,235,.1);
+}
+.modal textarea { resize: vertical; min-height: 55px; }
+.modal .row { display: grid; grid-template-columns: 1fr 1fr; gap: 0 .65rem; }
+.btn-row { display: flex; gap: .5rem; margin-top: .5rem; }
+.btn-row button {
+  flex: 1; padding: .65rem; border-radius: 6px;
+  font-size: .88rem; font-weight: 600;
+  cursor: pointer; border: none;
+}
+.btn-pri { background: var(--pri); color: #fff; }
+.btn-pri:hover { background: var(--pri-dk); }
+.btn-can { background: #f1f5f9; color: var(--mut); border: 1px solid var(--bdr) !important; }
+.btn-can:hover { background: #e2e8f0; }
+.btn-del { background: var(--red); color: #fff; }
+.btn-del:hover { background: #b91c1c; }
+
+/* ── Toast ────────────────────────────────── */
+.toast {
+  position: fixed; bottom: 1.5rem; left: 50%;
+  transform: translateX(-50%); padding: .7rem 1.2rem;
+  border-radius: 8px; font-size: .88rem; font-weight: 500;
+  opacity: 0; transition: opacity .3s; pointer-events: none;
+  z-index: 200; color: #fff;
+}
+.toast.show { opacity: 1; }
+.toast.ok { background: #1e293b; }
+.toast.err { background: #dc2626; }
+
+/* ── Settings Helpers ─────────────────────── */
+.est-row {
+  display: flex; align-items: center; gap: .5rem;
+  margin-bottom: .45rem;
+}
+.est-row input[type="text"] { flex: 1; margin-bottom: 0; }
+.est-row input[type="color"] {
+  width: 34px; height: 34px; padding: 2px;
+  border-radius: 6px; cursor: pointer;
+  margin-bottom: 0; border: 1px solid var(--bdr);
+}
+.est-row .remove-btn {
+  background: none; border: none; color: var(--red);
+  cursor: pointer; font-size: 1.1rem; padding: 3px;
+  flex-shrink: 0;
+}
+.add-btn {
+  width: 100%; padding: .45rem;
+  background: var(--blu-lt); color: var(--pri);
+  border: 1px dashed var(--pri); border-radius: 6px;
+  cursor: pointer; font-size: .82rem; font-weight: 500;
+  margin-bottom: .75rem;
+}
+.add-btn:hover { background: #bfdbfe; }
+.set-reg-tabs {
+  display: flex; gap: .25rem; margin-bottom: 1rem; flex-wrap: wrap;
+}
+.set-reg-tab {
+  padding: .4rem .75rem; border: 1px solid var(--bdr);
+  border-radius: 6px; background: var(--card);
+  font-size: .8rem; cursor: pointer; font-weight: 500;
+}
+.set-reg-tab.active {
+  background: var(--pri); color: #fff; border-color: var(--pri);
+}
+
+/* ── Responsive ───────────────────────────── */
+@media (max-width: 768px) {
+  .main { padding: .75rem; }
+  header { padding: .75rem 1rem; }
+  .region-bar { padding: 0 .75rem; }
+}
+</style>
+</head>
+<body>
+
+<!-- ══════ HEADER ══════ -->
+<header>
+  <h1>&#x1F4CB; Estimate Scheduler</h1>
+  <div class="hdr-r">
+    <span style="font-size:.8rem"><span class="live-dot"></span> Live</span>
+    <button onclick="openSettings()">&#9881; Settings</button>
+  </div>
+</header>
+
+<!-- ══════ REGION TABS ══════ -->
+<div class="region-bar" id="regionBar"></div>
+
+<!-- ══════ MAIN ══════ -->
+<div class="main">
+  <div class="date-nav">
+    <button class="nav-btn" onclick="navigate(-1)">&#9664;</button>
+    <h2 id="weekLabel"></h2>
+    <button class="nav-btn" onclick="navigate(1)">&#9654;</button>
+    <button class="today-btn" onclick="goToday()">Today</button>
+    <div class="view-btns">
+      <button class="view-btn active" id="btnWeek" onclick="setView('week')">Week</button>
+      <button class="view-btn" id="btnDay" onclick="setView('day')">Day</button>
+    </div>
+  </div>
+  <div class="cal-wrap">
+    <table class="cal" id="calTable"></table>
+  </div>
+</div>
+
+<!-- ══════ BOOKING MODAL ══════ -->
+<div class="overlay hidden" id="bookingOverlay">
+  <div class="modal">
+    <h2>Schedule Estimate</h2>
+    <div class="sub" id="bookingSub"></div>
+    <div class="row">
+      <div><label>First Name *</label><input id="bk_first" /></div>
+      <div><label>Last Name *</label><input id="bk_last" /></div>
+    </div>
+    <div class="row">
+      <div><label>Phone *</label><input id="bk_phone" type="tel" /></div>
+      <div><label>Email</label><input id="bk_email" type="email" /></div>
+    </div>
+    <label>Street Address *</label>
+    <input id="bk_address" placeholder="123 Main St" />
+    <div class="row">
+      <div><label>City *</label><input id="bk_city" /></div>
+      <div>
+        <label>State / ZIP</label>
+        <div style="display:flex;gap:.4rem;">
+          <input id="bk_state" maxlength="2" style="width:55px" placeholder="CA" />
+          <input id="bk_zip" maxlength="10" placeholder="ZIP" />
+        </div>
+      </div>
+    </div>
+    <label>Flooring Type</label>
+    <select id="bk_flooring">
+      <option value="">-- Select --</option>
+      <option>Carpet</option>
+      <option>Hardwood</option>
+      <option>Laminate</option>
+      <option>Luxury Vinyl Plank (LVP)</option>
+      <option>Tile</option>
+      <option>Other</option>
+    </select>
+    <div class="row">
+      <div><label>Rooms</label><input id="bk_rooms" type="number" min="1" max="50" /></div>
+      <div></div>
+    </div>
+    <label>Notes</label>
+    <textarea id="bk_notes" placeholder="Gate code, pets, special requests..."></textarea>
+    <div class="btn-row">
+      <button class="btn-can" onclick="closeBooking()">Cancel</button>
+      <button class="btn-pri" onclick="saveBooking()">Save Estimate</button>
+    </div>
+  </div>
+</div>
+
+<!-- ══════ DETAIL MODAL ══════ -->
+<div class="overlay hidden" id="detailOverlay">
+  <div class="modal">
+    <h2>Estimate Details</h2>
+    <div id="detailBody" style="font-size:.88rem;line-height:1.75;"></div>
+    <div class="btn-row" style="margin-top:1rem;">
+      <button class="btn-can" onclick="closeDetail()">Close</button>
+      <button class="btn-del" onclick="deleteBooking()">Cancel Estimate</button>
+    </div>
+  </div>
+</div>
+
+<!-- ══════ SETTINGS MODAL ══════ -->
+<div class="overlay hidden" id="settingsOverlay">
+  <div class="modal" style="max-width:540px;">
+    <h2>Settings</h2>
+    <div class="sub">Manage your regions and the estimators in each region.</div>
+
+    <h3 style="font-size:.85rem;margin-bottom:.5rem;">Regions</h3>
+    <div id="regionEditor"></div>
+    <button class="add-btn" onclick="addRegionRow()">+ Add Region</button>
+
+    <h3 style="font-size:.85rem;margin-bottom:.5rem;">Estimators</h3>
+    <div class="sub">Pick a region tab below, then add or remove its estimators.</div>
+    <div class="set-reg-tabs" id="settingsRegionTabs"></div>
+    <div id="estimatorEditor"></div>
+    <button class="add-btn" onclick="addEstimatorRow()">+ Add Estimator</button>
+
+    <div class="btn-row">
+      <button class="btn-can" onclick="closeSettings()">Cancel</button>
+      <button class="btn-pri" onclick="saveSettings()">Save All Changes</button>
+    </div>
+  </div>
+</div>
+
+<!-- ══════ TOAST ══════ -->
+<div class="toast" id="toast"></div>
+
+
+<!-- ══════════════════════════════════════════ -->
+<!-- JAVASCRIPT                                -->
+<!-- ══════════════════════════════════════════ -->
+<script>
+/* ── Constants ────────────────────────────── */
+var SLOTS = ["9:00 AM", "11:00 AM", "2:00 PM", "4:00 PM"];
+var COLORS = ["#3b82f6","#ef4444","#16a34a","#f59e0b","#8b5cf6","#ec4899","#14b8a6","#f97316"];
+
+/* ── State ────────────────────────────────── */
+var currentView = "week";
+var weekStart = getMonday(new Date());
+var regions = [];
+var estimators = [];
+var bookings = [];
+var activeRegionId = null;
+var pendingSlot = null;
+var viewingBookingId = null;
+var lastBookingCount = -1;
+var settingsRegionId = null;
+var allEstimatorsCache = [];
+
+
+/* ═══════════════════════════════════════════ */
+/*  UTILITIES                                  */
+/* ═══════════════════════════════════════════ */
+
+function getMonday(d) {
+  d = new Date(d);
+  var day = d.getDay();
+  var diff = d.getDate() - day + (day === 0 ? -6 : 1);
+  d.setDate(diff);
+  d.setHours(0, 0, 0, 0);
+  return d;
+}
+
+function dateStr(d) {
+  return d.toISOString().slice(0, 10);
+}
+
+function dateNice(d) {
+  return d.toLocaleDateString("en-US", {
+    weekday: "short", month: "short", day: "numeric"
+  });
+}
+
+function dateFull(d) {
+  return d.toLocaleDateString("en-US", {
+    weekday: "long", month: "long", day: "numeric", year: "numeric"
+  });
+}
+
+function showToast(msg, type) {
+  var el = document.getElementById("toast");
+  el.textContent = msg;
+  el.className = "toast " + (type || "ok") + " show";
+  setTimeout(function() { el.classList.remove("show"); }, 3000);
+}
+
+function getField(id) {
+  return document.getElementById(id).value.trim();
+}
+
+function apiCall(method, url, body) {
+  var opts = { method: method, headers: { "Content-Type": "application/json" } };
+  if (body) { opts.body = JSON.stringify(body); }
+  return fetch(url, opts).then(function(resp) {
+    return resp.json().then(function(data) {
+      if (!resp.ok) { throw new Error(data.error || resp.statusText); }
+      return data;
+    });
+  });
+}
+
+function getDays() {
+  var days = [];
+  if (currentView === "week") {
+    for (var i = 0; i < 6; i++) {
+      var d = new Date(weekStart);
+      d.setDate(d.getDate() + i);
+      days.push(d);
+    }
+  } else {
+    days.push(new Date(weekStart));
+  }
+  return days;
+}
+
+function escHtml(str) {
+  var div = document.createElement("div");
+  div.textContent = str;
+  return div.innerHTML;
+}
+
+
+/* ═══════════════════════════════════════════ */
+/*  DATA LOADING                               */
+/* ═══════════════════════════════════════════ */
+
+function loadRegions() {
+  return apiCall("GET", "/api/regions").then(function(data) {
+    regions = data;
+    if (regions.length > 0 && !activeRegionId) {
+      activeRegionId = regions[0].id;
+    }
+  });
+}
+
+function loadEstimators() {
+  return apiCall("GET", "/api/estimators?region_id=" + activeRegionId).then(function(data) {
+    estimators = data;
+  });
+}
+
+function loadBookings() {
+  var days = getDays();
+  var fromDate = dateStr(days[0]);
+  var toDate = dateStr(days[days.length - 1]);
+  var url = "/api/bookings?from=" + fromDate + "&to=" + toDate + "&region_id=" + activeRegionId;
+  return apiCall("GET", url).then(function(data) {
+    bookings = data;
+  });
+}
+
+function refreshAll() {
+  return loadRegions()
+    .then(function() { return loadEstimators(); })
+    .then(function() { return loadBookings(); })
+    .then(function() { renderAll(); });
+}
+
+
+/* ═══════════════════════════════════════════ */
+/*  POLLING (auto-refresh every 5s)            */
+/* ═══════════════════════════════════════════ */
+
+function pollForChanges() {
+  apiCall("GET", "/api/bookings/count").then(function(data) {
+    if (lastBookingCount !== -1 && data.count !== lastBookingCount) {
+      loadBookings().then(function() { renderCalendar(); });
+    }
+    lastBookingCount = data.count;
+  }).catch(function() {});
+  setTimeout(pollForChanges, 5000);
+}
+
+
+/* ═══════════════════════════════════════════ */
+/*  RENDERING                                  */
+/* ═══════════════════════════════════════════ */
+
+function renderAll() {
+  renderRegionTabs();
+  renderCalendar();
+}
+
+function renderRegionTabs() {
+  var html = "";
+  for (var i = 0; i < regions.length; i++) {
+    var r = regions[i];
+    var cls = r.id === activeRegionId ? "region-tab active" : "region-tab";
+    html += '<div class="' + cls + '" onclick="switchRegion(' + r.id + ')">' + escHtml(r.name) + '</div>';
+  }
+  document.getElementById("regionBar").innerHTML = html;
+}
+
+function renderCalendar() {
+  var days = getDays();
+  var numSlots = SLOTS.length;
+  var todayStr = dateStr(new Date());
+
+  /* ── Week label ── */
+  if (currentView === "week") {
+    var endDay = new Date(weekStart);
+    endDay.setDate(endDay.getDate() + 5);
+    document.getElementById("weekLabel").textContent =
+      weekStart.toLocaleDateString("en-US", { month: "long", day: "numeric" }) +
+      " \u2013 " +
+      endDay.toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
+  } else {
+    document.getElementById("weekLabel").textContent = dateFull(weekStart);
+  }
+
+  document.getElementById("btnWeek").classList.toggle("active", currentView === "week");
+  document.getElementById("btnDay").classList.toggle("active", currentView === "day");
+
+  /* ── Build table ── */
+  /*
+     Layout:
+     Row 1 (header): [corner] [Day1 colspan=4] [Day2 colspan=4] ...
+     Row 2 (header): [corner] [9AM][11AM][2PM][4PM] [9AM][11AM][2PM][4PM] ...
+     Row 3+:         [Estimator Name] [slot][slot][slot][slot] [slot]...
+  */
+
+  var html = "<thead>";
+
+  /* Header row 1: day names */
+  html += '<tr><th class="corner" rowspan="2" style="vertical-align:bottom;font-size:.7rem;">ESTIMATOR</th>';
+  for (var d = 0; d < days.length; d++) {
+    var isToday = dateStr(days[d]) === todayStr;
+    var dayCls = "day-hdr" + (isToday ? " today" : "");
+    html += '<th class="' + dayCls + '" colspan="' + numSlots + '">' + dateNice(days[d]) + '</th>';
+  }
+  html += "</tr>";
+
+  /* Header row 2: time slots under each day */
+  html += "<tr>";
+  for (var d = 0; d < days.length; d++) {
+    for (var s = 0; s < SLOTS.length; s++) {
+      html += '<th class="time-hdr">' + SLOTS[s] + '</th>';
+    }
+  }
+  html += "</tr></thead>";
+
+  /* Body: one row per estimator */
+  html += "<tbody>";
+
+  if (estimators.length === 0) {
+    var totalCols = 1 + (days.length * numSlots);
+    html += '<tr><td colspan="' + totalCols + '" class="empty-msg">';
+    html += 'No estimators in this region yet. Click &#9881; Settings to add some.';
+    html += '</td></tr>';
+  }
+
+  for (var e = 0; e < estimators.length; e++) {
+    var est = estimators[e];
+    html += "<tr>";
+
+    /* Estimator name cell (sticky left) */
+    html += '<td class="est-cell">';
+    html += '<span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:' + est.color + ';margin-right:6px;vertical-align:middle;"></span>';
+    html += escHtml(est.name);
+    html += '</td>';
+
+    /* Slots for each day */
+    for (var d = 0; d < days.length; d++) {
+      var ds = dateStr(days[d]);
+
+      for (var s = 0; s < SLOTS.length; s++) {
+        var slot = SLOTS[s];
+        var bk = findBooking(ds, slot, est.id);
+
+        if (bk) {
+          /* Booked slot */
+          var addrParts = [];
+          if (bk.address) { addrParts.push(bk.address); }
+          if (bk.city) { addrParts.push(bk.city); }
+          var addrShort = addrParts.join(", ");
+
+          html += '<td><div class="slot booked" onclick="viewDetail(' + bk.id + ')">';
+          html += '<span class="badge badge-bk">BOOKED</span>';
+          html += '<div class="name">' + escHtml(bk.first_name) + ' ' + escHtml(bk.last_name) + '</div>';
+          if (bk.flooring_type) {
+            html += '<div class="type">' + escHtml(bk.flooring_type) + '</div>';
+          }
+          if (addrShort) {
+            html += '<div class="addr">&#x1F4CD; ' + escHtml(addrShort) + '</div>';
+          }
+          html += '</div></td>';
+        } else {
+          /* Open slot */
+          html += '<td><div class="slot open" onclick="openBooking(\'' + ds + '\',\'' + slot + '\',' + est.id + ',\'' + escHtml(est.name).replace(/'/g, "\\'") + '\')">';
+          html += '<span class="badge badge-open">OPEN</span>';
+          html += '</div></td>';
+        }
+      }
+    }
+    html += "</tr>";
+  }
+
+  html += "</tbody>";
+  document.getElementById("calTable").innerHTML = html;
+}
+
+function findBooking(dateVal, timeSlot, estimatorId) {
+  for (var i = 0; i < bookings.length; i++) {
+    var b = bookings[i];
+    if (b.date === dateVal && b.time_slot === timeSlot && b.estimator_id === estimatorId) {
+      return b;
+    }
+  }
+  return null;
+}
+
+
+/* ═══════════════════════════════════════════ */
+/*  REGION SWITCHING                           */
+/* ═══════════════════════════════════════════ */
+
+function switchRegion(id) {
+  activeRegionId = id;
+  loadEstimators()
+    .then(function() { return loadBookings(); })
+    .then(function() { renderAll(); });
+}
+
+
+/* ═══════════════════════════════════════════ */
+/*  NAVIGATION                                 */
+/* ═══════════════════════════════════════════ */
+
+function navigate(dir) {
+  var step = currentView === "week" ? 7 : 1;
+  weekStart.setDate(weekStart.getDate() + dir * step);
+  loadBookings().then(function() { renderCalendar(); });
+}
+
+function goToday() {
+  weekStart = getMonday(new Date());
+  loadBookings().then(function() { renderCalendar(); });
+}
+
+function setView(v) {
+  currentView = v;
+  if (v === "day") {
+    weekStart = new Date();
+    weekStart.setHours(0, 0, 0, 0);
+  } else {
+    weekStart = getMonday(new Date());
+  }
+  loadBookings().then(function() { renderCalendar(); });
+}
+
+
+/* ═══════════════════════════════════════════ */
+/*  BOOKING MODAL                              */
+/* ═══════════════════════════════════════════ */
+
+function openBooking(date, slot, estId, estName) {
+  pendingSlot = { date: date, time_slot: slot, estimator_id: estId };
+  var d = new Date(date + "T12:00:00");
+  document.getElementById("bookingSub").textContent = estName + " \u2014 " + dateFull(d) + " at " + slot;
+
+  var fields = ["bk_first","bk_last","bk_phone","bk_email","bk_address","bk_city","bk_state","bk_zip","bk_rooms","bk_notes"];
+  for (var i = 0; i < fields.length; i++) {
+    document.getElementById(fields[i]).value = "";
+  }
+  document.getElementById("bk_flooring").value = "";
+  document.getElementById("bookingOverlay").classList.remove("hidden");
+}
+
+function closeBooking() {
+  document.getElementById("bookingOverlay").classList.add("hidden");
+  pendingSlot = null;
+}
+
+function saveBooking() {
+  var firstName = getField("bk_first");
+  var lastName = getField("bk_last");
+  var phone = getField("bk_phone");
+
+  if (!firstName || !lastName || !phone) {
+    showToast("Please fill in name and phone.", "err");
+    return;
+  }
+
+  var payload = {
+    date: pendingSlot.date,
+    time_slot: pendingSlot.time_slot,
+    estimator_id: pendingSlot.estimator_id,
+    first_name: firstName,
+    last_name: lastName,
+    phone: phone,
+    email: getField("bk_email"),
+    address: getField("bk_address"),
+    city: getField("bk_city"),
+    state: getField("bk_state"),
+    zip: getField("bk_zip"),
+    flooring_type: document.getElementById("bk_flooring").value,
+    rooms: document.getElementById("bk_rooms").value || 1,
+    notes: getField("bk_notes")
+  };
+
+  apiCall("POST", "/api/bookings", payload)
+    .then(function() {
+      closeBooking();
+      return loadBookings();
+    })
+    .then(function() {
+      renderCalendar();
+      showToast("\u2713 Estimate scheduled!");
+    })
+    .catch(function(err) {
+      showToast(err.message, "err");
+      loadBookings().then(function() { renderCalendar(); });
+    });
+}
+
+
+/* ═══════════════════════════════════════════ */
+/*  DETAIL MODAL                               */
+/* ═══════════════════════════════════════════ */
+
+function viewDetail(id) {
+  viewingBookingId = id;
+  var bk = findBookingById(id);
+  if (!bk) return;
+
+  var d = new Date(bk.date + "T12:00:00");
+  var addrParts = [bk.address, bk.city, [bk.state, bk.zip].filter(Boolean).join(" ")].filter(Boolean);
+  var fullAddr = addrParts.join(", ");
+
+  var html = "";
+  html += "<p><b>Estimator:</b> " + escHtml(bk.estimator_name) + "</p>";
+  html += "<p><b>Date:</b> " + dateFull(d) + "</p>";
+  html += "<p><b>Time:</b> " + bk.time_slot + "</p>";
+  html += '<hr style="margin:.5rem 0;border:none;border-top:1px solid #e2e8f0;">';
+  html += "<p><b>Customer:</b> " + escHtml(bk.first_name) + " " + escHtml(bk.last_name) + "</p>";
+  html += "<p><b>Phone:</b> " + escHtml(bk.phone) + "</p>";
+  if (bk.email) { html += "<p><b>Email:</b> " + escHtml(bk.email) + "</p>"; }
+  if (fullAddr) { html += "<p><b>Address:</b> " + escHtml(fullAddr) + "</p>"; }
+  if (bk.flooring_type) { html += "<p><b>Flooring:</b> " + escHtml(bk.flooring_type) + "</p>"; }
+  if (bk.rooms) { html += "<p><b>Rooms:</b> " + bk.rooms + "</p>"; }
+  if (bk.notes) { html += "<p><b>Notes:</b> " + escHtml(bk.notes) + "</p>"; }
+  html += '<p style="font-size:.72rem;color:#64748b;margin-top:.7rem;">Created: ' + new Date(bk.created_at).toLocaleString() + '</p>';
+
+  document.getElementById("detailBody").innerHTML = html;
+  document.getElementById("detailOverlay").classList.remove("hidden");
+}
+
+function closeDetail() {
+  document.getElementById("detailOverlay").classList.add("hidden");
+  viewingBookingId = null;
+}
+
+function deleteBooking() {
+  if (!confirm("Cancel this estimate?")) return;
+  apiCall("DELETE", "/api/bookings/" + viewingBookingId)
+    .then(function() {
+      closeDetail();
+      return loadBookings();
+    })
+    .then(function() {
+      renderCalendar();
+      showToast("Estimate cancelled.");
+    });
+}
+
+function findBookingById(id) {
+  for (var i = 0; i < bookings.length; i++) {
+    if (bookings[i].id === id) return bookings[i];
+  }
+  return null;
+}
+
+
+/* ═══════════════════════════════════════════ */
+/*  SETTINGS MODAL                             */
+/* ═══════════════════════════════════════════ */
+
+function openSettings() {
+  loadRegions().then(function() {
+    return apiCall("GET", "/api/estimators");
+  }).then(function(allEst) {
+    allEstimatorsCache = allEst;
+
+    /* Render region editor */
+    var regHtml = "";
+    for (var i = 0; i < regions.length; i++) {
+      var r = regions[i];
+      regHtml += '<div class="est-row" data-id="' + r.id + '">';
+      regHtml += '<input type="text" value="' + escHtml(r.name) + '" />';
+      regHtml += '<button class="remove-btn" onclick="this.parentElement.remove()">&#10005;</button>';
+      regHtml += '</div>';
+    }
+    document.getElementById("regionEditor").innerHTML = regHtml;
+
+    /* Default to first region in settings */
+    settingsRegionId = regions.length > 0 ? regions[0].id : null;
+    renderSettingsEstimators();
+
+    document.getElementById("settingsOverlay").classList.remove("hidden");
+  });
+}
+
+function closeSettings() {
+  document.getElementById("settingsOverlay").classList.add("hidden");
+}
+
+function renderSettingsEstimators() {
+  /* Region tabs in settings */
+  var tabHtml = "";
+  for (var i = 0; i < regions.length; i++) {
+    var r = regions[i];
+    var cls = r.id === settingsRegionId ? "set-reg-tab active" : "set-reg-tab";
+    tabHtml += '<button class="' + cls + '" onclick="switchSettingsRegion(' + r.id + ')">' + escHtml(r.name) + '</button>';
+  }
+  document.getElementById("settingsRegionTabs").innerHTML = tabHtml;
+
+  /* Estimators for selected region */
+  var estHtml = "";
+  for (var i = 0; i < allEstimatorsCache.length; i++) {
+    var e = allEstimatorsCache[i];
+    if (e.region_id !== settingsRegionId) continue;
+    estHtml += '<div class="est-row" data-id="' + e.id + '">';
+    estHtml += '<input type="color" value="' + e.color + '" />';
+    estHtml += '<input type="text" value="' + escHtml(e.name) + '" />';
+    estHtml += '<button class="remove-btn" onclick="this.parentElement.remove()">&#10005;</button>';
+    estHtml += '</div>';
+  }
+  document.getElementById("estimatorEditor").innerHTML = estHtml;
+}
+
+function switchSettingsRegion(id) {
+  /* First, save current region's estimators to cache before switching */
+  saveEstimatorsToCache();
+  settingsRegionId = id;
+  renderSettingsEstimators();
+}
+
+function saveEstimatorsToCache() {
+  /* Update allEstimatorsCache with current editor state */
+  if (!settingsRegionId) return;
+
+  /* Remove old entries for this region from cache */
+  allEstimatorsCache = allEstimatorsCache.filter(function(e) {
+    return e.region_id !== settingsRegionId;
+  });
+
+  /* Add current editor entries */
+  var rows = document.querySelectorAll("#estimatorEditor .est-row");
+  for (var i = 0; i < rows.length; i++) {
+    var row = rows[i];
+    var name = row.querySelector('input[type="text"]').value.trim();
+    var color = row.querySelector('input[type="color"]').value;
+    var id = row.dataset.id ? parseInt(row.dataset.id) : null;
+    if (name) {
+      allEstimatorsCache.push({
+        id: id, name: name, color: color,
+        region_id: settingsRegionId, active: 1
+      });
+    }
+  }
+}
+
+function addRegionRow() {
+  var ed = document.getElementById("regionEditor");
+  var div = document.createElement("div");
+  div.className = "est-row";
+  div.innerHTML = '<input type="text" placeholder="Region name" /><button class="remove-btn" onclick="this.parentElement.remove()">&#10005;</button>';
+  ed.appendChild(div);
+}
+
+function addEstimatorRow() {
+  var ed = document.getElementById("estimatorEditor");
+  var n = ed.children.length;
+  var div = document.createElement("div");
+  div.className = "est-row";
+  div.innerHTML = '<input type="color" value="' + COLORS[n % COLORS.length] + '" /><input type="text" placeholder="Estimator name" /><button class="remove-btn" onclick="this.parentElement.remove()">&#10005;</button>';
+  ed.appendChild(div);
+}
+
+function saveSettings() {
+  /* 1. Save regions */
+  var regRows = document.querySelectorAll("#regionEditor .est-row");
+  var regList = [];
+  for (var i = 0; i < regRows.length; i++) {
+    var name = regRows[i].querySelector('input[type="text"]').value.trim();
+    var id = regRows[i].dataset.id ? parseInt(regRows[i].dataset.id) : null;
+    if (name) { regList.push({ id: id, name: name }); }
+  }
+  if (regList.length === 0) {
+    showToast("Add at least one region.", "err");
+    return;
+  }
+
+  /* Save current estimator editor to cache */
+  saveEstimatorsToCache();
+
+  apiCall("POST", "/api/regions", regList).then(function() {
+    /* 2. Reload regions to get new IDs */
+    return loadRegions();
+  }).then(function() {
+    /* 3. Save estimators for each region */
+    var promises = [];
+    for (var r = 0; r < regions.length; r++) {
+      var rid = regions[r].id;
+      var regionEsts = allEstimatorsCache.filter(function(e) { return e.region_id === rid; });
+      var estList = regionEsts.map(function(e) { return { id: e.id, name: e.name, color: e.color }; });
+      if (estList.length > 0) {
+        promises.push(apiCall("POST", "/api/estimators", { region_id: rid, estimators: estList }));
+      }
+    }
+    return Promise.all(promises);
+  }).then(function() {
+    closeSettings();
+    return refreshAll();
+  }).then(function() {
+    showToast("\u2713 Settings saved!");
+  }).catch(function(err) {
+    showToast("Error: " + err.message, "err");
+  });
+}
+
+
+/* ═══════════════════════════════════════════ */
+/*  BOOT                                       */
+/* ═══════════════════════════════════════════ */
+
+refreshAll().then(function() {
+  pollForChanges();
+});
+
+</script>
+</body>
+</html>
