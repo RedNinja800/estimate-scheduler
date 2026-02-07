@@ -1,9 +1,5 @@
 
-import os
-import sqlite3
-import requests
-import time
-import threading
+import os, sqlite3, requests, time, threading
 from datetime import datetime
 from flask import Flask, request, jsonify, send_from_directory, g
 from flask_cors import CORS
@@ -20,7 +16,6 @@ RFMS_STORE_QUEUE = os.environ.get("RFMS_STORE_QUEUE", "")
 RFMS_API_KEY = os.environ.get("RFMS_API_KEY", "")
 RFMS_ENABLED = bool(RFMS_STORE_QUEUE and RFMS_API_KEY)
 
-# Phase-1: customer search/create only, no opportunity creation
 RFMS_DEFAULT_STORE_NUMBER = int(os.environ.get("RFMS_DEFAULT_STORE_NUMBER", "1"))
 RFMS_DEFAULT_SALESPERSON = os.environ.get("RFMS_DEFAULT_SALESPERSON", "ROBERT JENNINGS")
 
@@ -41,10 +36,7 @@ def rfms_get_session():
         try:
             resp = requests.post(
                 RFMS_BASE_URL + "/session/begin",
-                headers={
-                    "Content-Type": "application/json",
-                    "Authorization": rfms_basic_auth(RFMS_STORE_QUEUE, RFMS_API_KEY),
-                },
+                headers={"Content-Type": "application/json", "Authorization": rfms_basic_auth(RFMS_STORE_QUEUE, RFMS_API_KEY)},
                 timeout=20,
             )
             resp.raise_for_status()
@@ -54,7 +46,7 @@ def rfms_get_session():
                 app.logger.warning("RFMS session/begin returned no sessionToken: %s", data)
                 return ""
             rfms_session["token"] = token
-            rfms_session["expires"] = now + 1200  # ~20 minutes
+            rfms_session["expires"] = now + 1200  # refresh every 20m
             return token
         except Exception as e:
             app.logger.warning("RFMS session/begin failed: %s", str(e))
@@ -73,13 +65,11 @@ def rfms_call(method, endpoint, payload=None):
         resp = requests.request(
             method,
             url,
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": rfms_basic_auth(RFMS_STORE_QUEUE, token),
-            },
+            headers={"Content-Type": "application/json", "Authorization": rfms_basic_auth(RFMS_STORE_QUEUE, token)},
             json=payload,
             timeout=30,
         )
+        # RFMS sometimes returns HTML on invalid URL; keep text for debugging
         ctype = resp.headers.get("Content-Type", "")
         if "application/json" in ctype:
             body = resp.json() if resp.content else {}
@@ -186,7 +176,8 @@ def init_db():
 
 init_db()
 
-# ── RFMS Helpers (customer-only) ──────────────
+
+# ── RFMS Helpers ──────────────────────────────
 def rfms_find_customer_id_by_phone(phone):
     payload = {
         "searchText": str(phone),
@@ -197,6 +188,7 @@ def rfms_find_customer_id_by_phone(phone):
     data, err = rfms_call("POST", "customers/find", payload)
     if err:
         return "", err
+    # standard wrapper
     result = data.get("result") if isinstance(data, dict) else None
     if isinstance(result, list) and result:
         c0 = result[0]
@@ -276,7 +268,7 @@ def rfms_test():
     return jsonify({"ok": bool(token), "session_preview": (token[:20] + "...") if token else ""})
 
 
-# ── Regions ───────────────────────────────────
+# ── REGIONS ──────────────────────────────────
 @app.route("/api/regions", methods=["GET"])
 def get_regions():
     db = get_db()
@@ -301,19 +293,21 @@ def save_regions():
     return jsonify([dict(r) for r in rows])
 
 
-# ── Estimators ────────────────────────────────
+# ── ESTIMATORS ───────────────────────────────
 @app.route("/api/estimators", methods=["GET"])
 def get_estimators():
     region_id = request.args.get("region_id")
     db = get_db()
     if region_id:
         rows = db.execute(
-            "SELECT e.*, r.name AS region_name FROM estimators e JOIN regions r ON e.region_id=r.id WHERE e.region_id=? ORDER BY e.sort_order,e.id",
+            "SELECT e.*, r.name AS region_name FROM estimators e JOIN regions r ON e.region_id=r.id "
+            "WHERE e.region_id=? ORDER BY e.sort_order,e.id",
             (region_id,),
         ).fetchall()
     else:
         rows = db.execute(
-            "SELECT e.*, r.name AS region_name FROM estimators e JOIN regions r ON e.region_id=r.id ORDER BY e.region_id,e.sort_order,e.id"
+            "SELECT e.*, r.name AS region_name FROM estimators e JOIN regions r ON e.region_id=r.id "
+            "ORDER BY e.region_id,e.sort_order,e.id"
         ).fetchall()
     return jsonify([dict(r) for r in rows])
 
@@ -338,12 +332,57 @@ def save_estimators():
             )
     db.commit()
     rows = db.execute(
-        "SELECT e.*, r.name AS region_name FROM estimators e JOIN regions r ON e.region_id=r.id ORDER BY e.region_id,e.sort_order,e.id"
+        "SELECT e.*, r.name AS region_name FROM estimators e JOIN regions r ON e.region_id=r.id "
+        "ORDER BY e.region_id,e.sort_order,e.id"
     ).fetchall()
     return jsonify([dict(r) for r in rows])
 
 
-# ── Bookings ──────────────────────────────────
+# ── TIME OFF ─────────────────────────────────
+@app.route("/api/timeoff", methods=["GET"])
+def get_timeoff():
+    region_id = request.args.get("region_id")
+    db = get_db()
+    if region_id:
+        rows = db.execute(
+            "SELECT t.*, e.name as estimator_name FROM time_off t JOIN estimators e ON t.estimator_id=e.id "
+            "WHERE e.region_id=? ORDER BY t.estimator_id, t.date, t.day_of_week",
+            (region_id,),
+        ).fetchall()
+    else:
+        rows = db.execute(
+            "SELECT t.*, e.name as estimator_name FROM time_off t JOIN estimators e ON t.estimator_id=e.id "
+            "ORDER BY t.estimator_id, t.date, t.day_of_week"
+        ).fetchall()
+    return jsonify([dict(r) for r in rows])
+
+
+@app.route("/api/timeoff", methods=["POST"])
+def save_timeoff():
+    data = request.json or []
+    if not isinstance(data, list):
+        return jsonify({"error": "Expected a list of time off entries"}), 400
+    db = get_db()
+    db.execute("DELETE FROM time_off")
+    for t in data:
+        estimator_id = int(t.get("estimator_id") or 0)
+        date = (t.get("date") or "").strip()
+        day_of_week = int(t.get("day_of_week") or -1)
+        label = (t.get("label") or "").strip()
+        recurring = 1 if t.get("recurring", False) else 0
+        if estimator_id and label:
+            db.execute(
+                "INSERT INTO time_off (estimator_id, date, day_of_week, label, recurring) VALUES (?,?,?,?,?)",
+                (estimator_id, date, day_of_week, label, recurring),
+            )
+    db.commit()
+    rows = db.execute(
+        "SELECT t.*, e.name as estimator_name FROM time_off t JOIN estimators e ON t.estimator_id=e.id ORDER BY t.estimator_id, t.date"
+    ).fetchall()
+    return jsonify([dict(r) for r in rows])
+
+
+# ── BOOKINGS ─────────────────────────────────
 @app.route("/api/bookings", methods=["GET"])
 def get_bookings():
     date_from = request.args.get("from", "")
@@ -390,8 +429,11 @@ def create_booking():
         return jsonify({"error": "This slot was already booked. Please refresh."}), 409
 
     rfms_customer_id = ""
-    rfms_opportunity_id = ""  # blank for now
+    rfms_opportunity_id = ""
     rfms_log = []
+
+    est_row = db.execute("SELECT name FROM estimators WHERE id=?", (estimator_id,)).fetchone()
+    estimator_name = est_row["name"] if est_row else ""
 
     if RFMS_ENABLED:
         # 1) find customer
