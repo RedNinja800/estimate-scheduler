@@ -1,7 +1,8 @@
-import os, sqlite3, json, requests
+import os, sqlite3, json, requests, time, threading
 from datetime import datetime, timedelta
 from flask import Flask, request, jsonify, send_from_directory, g
 from flask_cors import CORS
+from base64 import b64encode
 
 app = Flask(__name__, static_folder="static")
 CORS(app)
@@ -9,30 +10,85 @@ CORS(app)
 DATABASE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scheduler.db")
 
 # ── RFMS API Config ──────────────────────────
-RFMS_BASE_URL  = os.environ.get("RFMS_API_BASE_URL", "https://api2.rfms.online")
-RFMS_TOKEN     = os.environ.get("RFMS_API_TOKEN", "")
-RFMS_STORE     = os.environ.get("RFMS_STORE_QUEUE", "")
-RFMS_ENABLED   = bool(RFMS_TOKEN and RFMS_STORE)
+RFMS_BASE_URL    = "https://api.rfms.online/v2"
+RFMS_STORE_QUEUE = os.environ.get("RFMS_STORE_QUEUE", "")
+RFMS_API_KEY     = os.environ.get("RFMS_API_KEY", "")
+RFMS_ENABLED     = bool(RFMS_STORE_QUEUE and RFMS_API_KEY)
 
-def rfms_headers():
-    return {
-        "Content-Type": "application/json",
-        "Authorization": "Basic " + RFMS_TOKEN,
-        "x-rfms-store-queue": RFMS_STORE,
-    }
+# Session management
+rfms_session = {
+    "token": "",
+    "expires": 0,
+    "lock": threading.Lock(),
+}
 
-def rfms_request(method, endpoint, payload=None):
-    """Make a request to the RFMS API. Returns dict or None on failure."""
+
+def rfms_basic_auth(username, password):
+    """Build Basic Auth header value."""
+    raw = username + ":" + password
+    return "Basic " + b64encode(raw.encode()).decode()
+
+
+def rfms_get_session():
+    """Get a valid RFMS session token. Creates one if expired."""
+    with rfms_session["lock"]:
+        now = time.time()
+        if rfms_session["token"] and rfms_session["expires"] > now + 60:
+            return rfms_session["token"]
+
+        # Begin a new session
+        try:
+            resp = requests.post(
+                RFMS_BASE_URL + "/session/begin",
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": rfms_basic_auth(RFMS_STORE_QUEUE, RFMS_API_KEY),
+                },
+                timeout=15,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            token = data.get("sessionToken", "")
+            if not token:
+                app.logger.warning("RFMS session/begin returned no sessionToken: %s", data)
+                return ""
+            rfms_session["token"] = token
+            # Sessions typically last ~30 min; refresh after 20 min
+            rfms_session["expires"] = now + 1200
+            app.logger.info("RFMS session started: %s", token[:20] + "...")
+            return token
+        except Exception as e:
+            app.logger.warning("RFMS session/begin failed: %s", str(e))
+            return ""
+
+
+def rfms_call(method, endpoint, payload=None):
+    """Make an authenticated RFMS API call. Returns (response_json, error_string)."""
     if not RFMS_ENABLED:
-        return None
-    url = RFMS_BASE_URL.rstrip("/") + "/" + endpoint.lstrip("/")
+        return None, "RFMS not configured"
+
+    token = rfms_get_session()
+    if not token:
+        return None, "Could not get RFMS session"
+
+    url = RFMS_BASE_URL + "/" + endpoint.lstrip("/")
     try:
-        resp = requests.request(method, url, headers=rfms_headers(), json=payload, timeout=15)
-        resp.raise_for_status()
-        return resp.json() if resp.content else {}
+        resp = requests.request(
+            method, url,
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": rfms_basic_auth(RFMS_STORE_QUEUE, token),
+            },
+            json=payload,
+            timeout=15,
+        )
+        body = resp.json() if resp.content else {}
+        if not resp.ok:
+            err_msg = body.get("message") or body.get("error") or resp.reason or str(resp.status_code)
+            return body, "RFMS error {}: {}".format(resp.status_code, err_msg)
+        return body, ""
     except Exception as e:
-        app.logger.warning("RFMS API error: %s", str(e))
-        return None
+        return None, "RFMS request failed: " + str(e)
 
 
 # ── Database ──────────────────────────────────
@@ -121,45 +177,47 @@ init_db()
 
 
 # ── RFMS Sync Helpers ─────────────────────────
-def rfms_find_or_create_customer(data):
-    """Search RFMS for existing customer by phone, or create new one.
-       Returns RFMS CustomerID string or empty string."""
-    if not RFMS_ENABLED:
+def rfms_find_customer(phone):
+    """Search RFMS for a customer by phone. Returns CustomerID or empty string."""
+    if not phone:
         return ""
-
-    phone = data.get("phone", "")
-    # 1. Try to find by phone
-    if phone:
-        result = rfms_request("GET", "customers?search=" + phone)
-        if result and isinstance(result, list) and len(result) > 0:
-            cid = result[0].get("CustomerID") or result[0].get("Id") or ""
-            return str(cid)
-
-    # 2. Create new customer
-    payload = {
-        "FirstName":  data.get("first_name", ""),
-        "LastName":   data.get("last_name", ""),
-        "Phone":      phone,
-        "Email":      data.get("email", ""),
-        "Address1":   data.get("address", ""),
-        "City":       data.get("city", ""),
-        "State":      data.get("state", ""),
-        "Zip":        data.get("zip", ""),
-    }
-    result = rfms_request("POST", "customers", payload)
-    if result:
-        cid = result.get("CustomerID") or result.get("Id") or ""
+    data, err = rfms_call("GET", "customers?search=" + requests.utils.quote(phone))
+    if err:
+        app.logger.warning("RFMS customer search failed: %s", err)
+        return ""
+    # Response could be a list or an object with a list inside
+    customers = data if isinstance(data, list) else data.get("customers", data.get("results", []))
+    if isinstance(customers, list) and len(customers) > 0:
+        cid = customers[0].get("CustomerID") or customers[0].get("customerId") or customers[0].get("Id") or ""
         return str(cid)
     return ""
 
 
-def rfms_create_estimate(customer_id, data, estimator_name):
-    """Create an estimate/quote header in RFMS with scheduling details
-       in InternalNotes. Returns RFMS estimate ID string or empty string."""
-    if not RFMS_ENABLED or not customer_id:
-        return ""
+def rfms_create_customer(booking_data):
+    """Create a new customer in RFMS. Returns CustomerID or empty string."""
+    payload = {
+        "FirstName":  booking_data.get("first_name", ""),
+        "LastName":   booking_data.get("last_name", ""),
+        "Phone1":     booking_data.get("phone", ""),
+        "Email":      booking_data.get("email", ""),
+        "Address1":   booking_data.get("address", ""),
+        "City":       booking_data.get("city", ""),
+        "State":      booking_data.get("state", ""),
+        "Zip":        booking_data.get("zip", ""),
+    }
+    data, err = rfms_call("POST", "customers", payload)
+    if err:
+        app.logger.warning("RFMS customer create failed: %s", err)
+        return "", err
+    if data:
+        cid = data.get("CustomerID") or data.get("customerId") or data.get("Id") or ""
+        return str(cid), ""
+    return "", "No data returned"
 
-    notes_text = (
+
+def rfms_create_estimate(customer_id, booking_data, estimator_name):
+    """Create an estimate/opportunity in RFMS. Returns estimate ID or empty string."""
+    notes = (
         "SCHEDULED ESTIMATE\n"
         "Date: {date}\n"
         "Time: {time_slot}\n"
@@ -169,45 +227,50 @@ def rfms_create_estimate(customer_id, data, estimator_name):
         "Address: {address}, {city} {state} {zip}\n"
         "Notes: {notes}"
     ).format(
-        date=data.get("date", ""),
-        time_slot=data.get("time_slot", ""),
+        date=booking_data.get("date", ""),
+        time_slot=booking_data.get("time_slot", ""),
         estimator=estimator_name,
-        flooring=data.get("flooring_type", ""),
-        rooms=data.get("rooms", ""),
-        address=data.get("address", ""),
-        city=data.get("city", ""),
-        state=data.get("state", ""),
-        zip=data.get("zip", ""),
-        notes=data.get("notes", ""),
+        flooring=booking_data.get("flooring_type", ""),
+        rooms=booking_data.get("rooms", ""),
+        address=booking_data.get("address", ""),
+        city=booking_data.get("city", ""),
+        state=booking_data.get("state", ""),
+        zip=booking_data.get("zip", ""),
+        notes=booking_data.get("notes", ""),
     )
-
     payload = {
-        "CustomerID":    customer_id,
-        "Type":          "Estimate",
-        "InternalNotes": notes_text,
+        "CustomerID": customer_id,
+        "InternalNotes": notes,
     }
-    result = rfms_request("POST", "estimates", payload)
-    if result:
-        eid = result.get("EstimateID") or result.get("Id") or result.get("QuoteID") or ""
-        return str(eid)
-    return ""
+    data, err = rfms_call("POST", "estimates", payload)
+    if err:
+        # Try alternate endpoint name
+        data, err = rfms_call("POST", "opportunities", payload)
+    if err:
+        app.logger.warning("RFMS estimate create failed: %s", err)
+        return "", err
+    if data:
+        eid = (data.get("EstimateID") or data.get("estimateId")
+               or data.get("OpportunityID") or data.get("Id") or "")
+        return str(eid), ""
+    return "", "No data returned"
 
 
-def rfms_update_customer(customer_id, data):
-    """Update an existing RFMS customer record."""
-    if not RFMS_ENABLED or not customer_id:
-        return
+def rfms_update_customer(customer_id, booking_data):
+    """Update an existing RFMS customer."""
     payload = {
-        "FirstName":  data.get("first_name", ""),
-        "LastName":   data.get("last_name", ""),
-        "Phone":      data.get("phone", ""),
-        "Email":      data.get("email", ""),
-        "Address1":   data.get("address", ""),
-        "City":       data.get("city", ""),
-        "State":      data.get("state", ""),
-        "Zip":        data.get("zip", ""),
+        "FirstName":  booking_data.get("first_name", ""),
+        "LastName":   booking_data.get("last_name", ""),
+        "Phone1":     booking_data.get("phone", ""),
+        "Email":      booking_data.get("email", ""),
+        "Address1":   booking_data.get("address", ""),
+        "City":       booking_data.get("city", ""),
+        "State":      booking_data.get("state", ""),
+        "Zip":        booking_data.get("zip", ""),
     }
-    rfms_request("PUT", "customers/" + customer_id, payload)
+    data, err = rfms_call("PUT", "customers/" + customer_id, payload)
+    if err:
+        app.logger.warning("RFMS customer update failed: %s", err)
 
 
 # ── Serve frontend ────────────────────────────
@@ -215,10 +278,20 @@ def rfms_update_customer(customer_id, data):
 def index():
     return send_from_directory("static", "index.html")
 
-# ── RFMS status endpoint ─────────────────────
 @app.route("/api/rfms/status", methods=["GET"])
 def rfms_status():
-    return jsonify({"enabled": RFMS_ENABLED})
+    return jsonify({"enabled": RFMS_ENABLED, "base_url": RFMS_BASE_URL})
+
+@app.route("/api/rfms/test", methods=["GET"])
+def rfms_test():
+    """Test RFMS connectivity by starting a session."""
+    if not RFMS_ENABLED:
+        return jsonify({"ok": False, "error": "RFMS not configured. Set RFMS_STORE_QUEUE and RFMS_API_KEY env vars."})
+    token = rfms_get_session()
+    if token:
+        return jsonify({"ok": True, "message": "RFMS session started successfully.", "session_preview": token[:20] + "..."})
+    else:
+        return jsonify({"ok": False, "error": "Could not start RFMS session. Check your Store Queue and API Key."})
 
 
 # ── REGIONS ───────────────────────────────────
@@ -325,20 +398,33 @@ def create_booking():
     if existing:
         return jsonify({"error": "This slot was already booked. Please refresh."}), 409
 
-    # ── RFMS sync: find/create customer, then create estimate ──
+    # ── RFMS sync ──
     rfms_cust_id = ""
     rfms_est_id = ""
-    rfms_log = ""
+    rfms_log_parts = []
+
     if RFMS_ENABLED:
-        rfms_cust_id = rfms_find_or_create_customer(data)
+        # 1. Search for existing customer by phone
+        rfms_cust_id = rfms_find_customer(phone)
         if rfms_cust_id:
-            # Look up estimator name for notes
+            rfms_log_parts.append("Found existing RFMS customer: " + rfms_cust_id)
+        else:
+            # 2. Create new customer
+            rfms_cust_id, err = rfms_create_customer(data)
+            if rfms_cust_id:
+                rfms_log_parts.append("Created RFMS customer: " + rfms_cust_id)
+            else:
+                rfms_log_parts.append("RFMS customer creation failed: " + err)
+
+        # 3. Create estimate
+        if rfms_cust_id:
             est_row = db.execute("SELECT name FROM estimators WHERE id=?", (estimator_id,)).fetchone()
             est_name = est_row["name"] if est_row else ""
-            rfms_est_id = rfms_create_estimate(rfms_cust_id, data, est_name)
-            rfms_log = "Synced to RFMS (Customer: {}, Estimate: {})".format(rfms_cust_id, rfms_est_id)
-        else:
-            rfms_log = "RFMS sync attempted but customer creation failed"
+            rfms_est_id, err = rfms_create_estimate(rfms_cust_id, data, est_name)
+            if rfms_est_id:
+                rfms_log_parts.append("Created RFMS estimate: " + rfms_est_id)
+            else:
+                rfms_log_parts.append("RFMS estimate creation failed: " + err)
 
     try:
         cur = db.execute(
@@ -355,12 +441,12 @@ def create_booking():
         db.commit()
         bid = cur.lastrowid
         log_detail = "Estimate created"
-        if rfms_log:
-            log_detail += ". " + rfms_log
+        if rfms_log_parts:
+            log_detail += ". " + "; ".join(rfms_log_parts)
         db.execute("INSERT INTO booking_log (booking_id,action,changed_by,details,created_at) VALUES (?,?,?,?,?)",
                    (bid, "Created", created_by or "Unknown", log_detail, datetime.now().isoformat()))
         db.commit()
-        return jsonify({"ok": True, "id": bid, "rfms_synced": bool(rfms_cust_id)}), 201
+        return jsonify({"ok": True, "id": bid, "rfms_synced": bool(rfms_cust_id), "rfms_log": rfms_log_parts}), 201
     except sqlite3.IntegrityError:
         return jsonify({"error": "Slot just booked by someone else. Please refresh."}), 409
 
@@ -399,8 +485,9 @@ def update_booking(bid):
          data.get("state",""), data.get("zip",""), data.get("flooring_type",""),
          data.get("rooms",1), data.get("notes",""), bid))
 
-    # ── RFMS sync on edit ──
-    rfms_cust_id = old["rfms_customer_id"] if "rfms_customer_id" in old.keys() else ""
+    # RFMS sync on edit
+    old_keys = old.keys()
+    rfms_cust_id = old["rfms_customer_id"] if "rfms_customer_id" in old_keys else ""
     if RFMS_ENABLED and rfms_cust_id:
         rfms_update_customer(rfms_cust_id, data)
         changes.append("RFMS customer record updated")
